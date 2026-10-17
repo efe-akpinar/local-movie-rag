@@ -1,5 +1,7 @@
 # Local Movie RAG
 
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/efe-akpinar/local-movie-rag/blob/main/movie_qa_rag.ipynb)
+
 Fully local question answering over 41k movies: bi-encoder retrieval with FAISS, cross-encoder re-ranking, and a 4-bit Qwen2.5-3B generator that cites its sources and refuses when the corpus can't answer.
 
 ## Highlights
@@ -116,13 +118,25 @@ At runtime the notebook also writes `rag_indexes/` (FAISS indexes), `movies_prep
 
 ## How to run
 
-1. Download the dataset from [Kaggle](https://www.kaggle.com/datasets/rounakbanik/the-movies-dataset), either manually or with the Kaggle CLI:
+The intended configuration (Qwen2.5-3B in 4-bit) needs a CUDA GPU. The free Colab T4 runtime is enough and produced the results above. Only `movies_metadata.csv` and `credits.csv` from the [Kaggle dataset](https://www.kaggle.com/datasets/rounakbanik/the-movies-dataset) are needed.
+
+**On Colab (recommended)**
+
+1. Click **Open in Colab** above and switch to a GPU runtime (Runtime → Change runtime type → T4 GPU).
+2. Upload `movies_metadata.csv` and `credits.csv` through the Files panel. They land in `/content`, where the notebook looks for them.
+3. Run all cells. The first code cell installs the packages Colab doesn't ship with (FAISS, bitsandbytes, RAGAS). The first run encodes the corpus and saves FAISS indexes to `rag_indexes/`.
+
+**Locally**
+
+1. Download the data into `data/` (or next to the notebook), manually or with the Kaggle CLI:
    ```bash
    kaggle datasets download -d rounakbanik/the-movies-dataset -p data --unzip
    ```
-   Only `movies_metadata.csv` and `credits.csv` are needed. Place them in `data/` or next to the notebook.
-2. Install dependencies (a CUDA GPU is recommended; 4-bit loading with bitsandbytes requires one):
+2. Install dependencies and open the notebook:
    ```bash
    pip install -r requirements.txt
+   jupyter notebook movie_qa_rag.ipynb
    ```
-3. Open `movie_qa_rag.ipynb` and run all cells. The first run encodes the corpus and saves FAISS indexes to `rag_indexes/`; later runs load them from disk. Without a GPU, generation falls back to `Qwen2.5-0.5B-Instruct` for smoke-testing.
+3. Run all cells. Later runs load the FAISS indexes from `rag_indexes/` instead of re-encoding.
+
+A local NVIDIA GPU with CUDA matches the Colab setup. On a CPU-only machine, including Macs, the code falls back to `Qwen2.5-0.5B-Instruct` for generation and the RAGAS judge. That is fine for a smoke test, but encoding 41k documents on CPU is slow and the answers and scores will not match the ones reported here.
