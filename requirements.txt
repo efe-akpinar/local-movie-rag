@@ -1,0 +1,16 @@
+# Retrieval, re-ranking and generation
+numpy<3
+pandas>=2.2
+torch
+faiss-cpu>=1.8.0
+sentence-transformers>=3.0.0
+transformers>=4.45.0
+accelerate      # required by transformers for device_map="auto"
+bitsandbytes    # required by transformers for 4-bit NF4 loading (CUDA)
+tqdm
+ipython
+
+# RAGAS evaluation
+ragas==0.2.9
+datasets
+langchain-huggingface<0.2

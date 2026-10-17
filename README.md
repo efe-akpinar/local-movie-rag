@@ -1,0 +1,128 @@
+# Local Movie RAG
+
+Fully local question answering over 41k movies: bi-encoder retrieval with FAISS, cross-encoder re-ranking, and a 4-bit Qwen2.5-3B generator that cites its sources and refuses when the corpus can't answer.
+
+## Highlights
+
+- End-to-end RAG with no hosted APIs: `bge-small` embeddings and FAISS, a MiniLM cross-encoder re-ranker, Qwen2.5-3B-Instruct (4-bit NF4) generation and a local RAGAS judge
+- Cross-encoder re-ranking raises Recall@5 from 0.875 to 0.9375 and fixes sequel confusion: *Toy Story* (1995) moves from rank 3 to rank 1 for "Who directed Toy Story?"
+- A strict grounding prompt reduces hallucinated answers on unanswerable questions from 4/4 to 0/4, with a deterministic post-2017 year guard as a backstop
+- Three controlled ablations (bi-encoder size, re-rank pool size, prompt) and a failure diary with before/after fixes
+- The smaller embedding model wins on this corpus: `bge-small` beats `bge-base` on Recall@5 (0.9375 vs 0.875) with less than half the indexing time
+
+## Overview
+
+The system answers questions such as "Who directed Inception?" or "Which movie is about a shark terrorizing Amity Island?" from a fixed movie corpus. Every answer must be grounded in retrieved documents and cite movie titles in brackets. Questions the corpus can't support, such as films released after July 2017, get an exact refusal string. The notebook builds the corpus, indexes it, implements retrieval, re-ranking and generation, and evaluates the pipeline on a 20-query test set of standard, adversarial, sequel-confusion and unanswerable questions.
+
+```mermaid
+flowchart LR
+    A["movies_metadata.csv<br/>credits.csv"] --> B["Preprocess<br/>41,328 movie documents"]
+    B --> C["bge-small-en-v1.5<br/>embeddings"]
+    C --> D[("FAISS<br/>IndexFlatIP")]
+    Q["Question"] --> E["Bi-encoder retrieval<br/>top 20"]
+    D --> E
+    E --> F["Cross-encoder re-rank<br/>top 5"]
+    F --> G{"Mentions a year<br/>after 2017?"}
+    G -- yes --> R["Refusal"]
+    G -- no --> H["Qwen2.5-3B-Instruct 4-bit<br/>strict grounded prompt"]
+    H --> I["Answer with<br/>[Title] citations"]
+```
+
+## Dataset
+
+[The Movies Dataset](https://www.kaggle.com/datasets/rounakbanik/the-movies-dataset) by Rounak Banik on Kaggle, with movie metadata and credits collected from the TMDB API. Two files are used: `movies_metadata.csv` (45,466 rows) and `credits.csv`.
+
+Preprocessing steps:
+
+- drop rows with a missing title or an empty overview
+- apply a 31 July 2017 release cutoff
+- deduplicate by title, keeping the longer overview
+- merge in the director and top-5 cast from `credits.csv`
+
+The result is 41,328 movie documents, each with Title, Year, Genres, Director, Cast and Overview fields. Overviews are short: mean 56.4 whitespace tokens, median 50, max 187.
+
+The data is not included in this repository. See the Kaggle page for its license terms.
+
+## Approach
+
+| Stage | Choice |
+|---|---|
+| Embeddings | `BAAI/bge-small-en-v1.5` (384-d), L2-normalized |
+| Vector store | FAISS `IndexFlatIP` (exact cosine search), persisted to disk with a `records.jsonl` sidecar for metadata |
+| Retrieval | top 20 bi-encoder candidates |
+| Re-ranking | `cross-encoder/ms-marco-MiniLM-L-6-v2`, top 5 contexts |
+| Generation | `Qwen/Qwen2.5-3B-Instruct`, 4-bit NF4 (bitsandbytes), greedy decoding, 180 new tokens |
+| Grounding | strict system prompt (context only, exact refusal string, `[Title]` citations) plus a regex year guard for post-2017 questions |
+| Evaluation | Recall@5/10 and MRR on 16 answerable queries; hallucination count on 4 unanswerable queries; RAGAS faithfulness, context precision and answer relevancy with a local Qwen2.5-3B judge |
+
+`run_query(query)` is the single entry point and always returns `{"answer": str, "retrieved_titles": list[str]}`, even on empty input or internal errors.
+
+## Results
+
+Retrieval quality on the 16 answerable test queries:
+
+| Configuration | Recall@5 | Recall@10 | MRR |
+|---|---|---|---|
+| Bi-encoder only | 0.8750 | 0.9375 | 0.7630 (top 10) |
+| Bi-encoder + cross-encoder | 0.9375 | n/a | 0.7188 (top 5) |
+
+Ablations:
+
+| Ablation | Setting | Recall@5 | MRR | Other |
+|---|---|---|---|---|
+| Bi-encoder size | `bge-small-en-v1.5` | 0.9375 | 0.7188 | 134.37 s indexing, 0.059 GB, 60.40 ms median latency |
+| | `bge-base-en-v1.5` | 0.8750 | 0.7188 | 363.94 s indexing, 0.118 GB, 70.69 ms median latency |
+| Re-rank pool | k = 5 | 0.8750 | 0.7708 | 30.06 ms median latency |
+| | k = 10 | 0.9375 | 0.7240 | 36.07 ms median latency |
+| | k = 20 | 0.9375 | 0.7188 | 61.18 ms median latency |
+| Prompt (year guard off) | Permissive | n/a | n/a | 4/4 hallucinated on unanswerable, RAGAS faithfulness 1.00 |
+| | Strict | n/a | n/a | 0/4 hallucinated on unanswerable, RAGAS faithfulness 0.75 |
+
+RAGAS on the strict prompt (6-query subset): faithfulness 0.750, context precision 0.625, answer relevancy 0.663.
+
+![Bi-encoder size ablation comparing bge-small and bge-base](figures/ablation_biencoder_size.png)
+*`bge-small` matches or beats `bge-base` on retrieval quality with less than half the indexing time and half the memory.*
+
+![Re-ranker pool size sweep](figures/ablation_topk_sweep.png)
+*Growing the re-rank pool from 5 to 10 candidates adds recall; going to 20 only adds latency.*
+
+![Prompt ablation: hallucinations vs RAGAS faithfulness](figures/ablation_prompt_hallucination.png)
+*The permissive prompt scores higher on RAGAS faithfulness yet fails to refuse any of the unanswerable questions.*
+
+## Key findings
+
+- **Re-ranking fixes sequel confusion.** The bi-encoder ranked *Toy Story 3* above the 1995 original with scores clustered around 0.7. The cross-encoder moved the original to rank 1 with much clearer separation.
+- **Faithfulness is not correctness.** The permissive prompt scored 1.00 on RAGAS faithfulness while answering all four unanswerable questions instead of refusing. For *Oppenheimer* (2023), it named the director of a loosely matching documentary in the corpus.
+- **Document format matters as much as the model.** Adding director and cast fields to each document turned "Who directed Inception?" from a refusal into a correct, cited answer, with identical retrieval.
+- **Bigger isn't automatically better.** On short, proper-noun-heavy overviews, `bge-small` beat `bge-base`. k=10 is the best recall/latency trade-off for the re-ranker.
+
+Limitations: RAGAS ran on a 6-query subset with a 3B local judge that often produced unparseable output, so those scores are indicative. Deduplicating by title alone drops same-title films; for example, the 2012 *The Avengers* is lost to the 1998 film.
+
+## Tech stack
+
+Python, PyTorch, sentence-transformers, FAISS, Hugging Face Transformers with bitsandbytes 4-bit quantization, pandas, RAGAS 0.2.9 with LangChain Hugging Face wrappers. The notebook was run on Google Colab with a T4 GPU.
+
+## Project structure
+
+```
+local-movie-rag/
+├── movie_qa_rag.ipynb   # pipeline, ablations, evaluation and discussion, with outputs
+├── figures/             # charts used in this README
+├── requirements.txt
+└── README.md
+```
+
+At runtime the notebook also writes `rag_indexes/` (FAISS indexes), `movies_preprocessed.pkl` and a few CSV result files. These are gitignored.
+
+## How to run
+
+1. Download the dataset from [Kaggle](https://www.kaggle.com/datasets/rounakbanik/the-movies-dataset), either manually or with the Kaggle CLI:
+   ```bash
+   kaggle datasets download -d rounakbanik/the-movies-dataset -p data --unzip
+   ```
+   Only `movies_metadata.csv` and `credits.csv` are needed. Place them in `data/` or next to the notebook.
+2. Install dependencies (a CUDA GPU is recommended; 4-bit loading with bitsandbytes requires one):
+   ```bash
+   pip install -r requirements.txt
+   ```
+3. Open `movie_qa_rag.ipynb` and run all cells. The first run encodes the corpus and saves FAISS indexes to `rag_indexes/`; later runs load them from disk. Without a GPU, generation falls back to `Qwen2.5-0.5B-Instruct` for smoke-testing.

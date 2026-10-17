@@ -1,0 +1,39 @@
+# Data (download from Kaggle, see README)
+data/
+*.csv
+*.zip
+*.npy
+*.pkl
+
+# Generated indexes and model artifacts
+rag_indexes/
+*.faiss
+*.bin
+*.pt
+*.pth
+*.safetensors
+*.ckpt
+checkpoint-*/
+
+# Secrets
+.env
+.env.*
+google-services.json
+GoogleService-Info.plist
+
+# Python / Jupyter
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+.venv/
+venv/
+
+# OS / editors
+.DS_Store
+__MACOSX/
+.vscode/
+.idea/
+
+# Agent files
+.claude/
+CLAUDE.md
