@@ -140,3 +140,139 @@ The intended configuration (Qwen2.5-3B in 4-bit) needs a CUDA GPU. The free Cola
 3. Run all cells. Later runs load the FAISS indexes from `rag_indexes/` instead of re-encoding.
 
 A local NVIDIA GPU with CUDA matches the Colab setup. On a CPU-only machine, including Macs, the code falls back to `Qwen2.5-0.5B-Instruct` for generation and the RAGAS judge. That is fine for a smoke test, but encoding 41k documents on CPU is slow and the answers and scores will not match the ones reported here.
+
+## Production deployment
+
+The notebook remains the record of the original experiments. The same pipeline also runs as a web service: the `movie_rag/` package, a FastAPI app served by Gunicorn in Docker, CI/CD to Google Cloud Run behind a retrieval-quality gate, Prometheus and Grafana monitoring, Locust load tests and optional Kubernetes manifests.
+
+**Hosted generation uses Groq.** The deployed service generates answers with Groq (`llama-3.3-70b-versatile`, temperature 0) instead of the local 4-bit Qwen2.5-3B used in the notebook. Everything around the LLM call is the notebook's code: preprocessing, `bge-small` + FAISS retrieval of the top 20, cross-encoder re-ranking to the top 5, the strict grounded prompt, the exact refusal string, `[Title]` citations and the post-2017 year guard. `LLM_PROVIDER=local` runs Qwen2.5-3B on a GPU, and `LLM_PROVIDER=fake` is a deterministic stand-in for tests.
+
+### Architecture
+
+```mermaid
+flowchart LR
+    subgraph Offline["Offline, local or Colab"]
+        CSV["movies_metadata.csv<br/>credits.csv"] --> Build["scripts/build_index.py<br/>41,328 documents"]
+    end
+    Build --> GCS[("GCS bucket<br/>index.faiss, records.jsonl,<br/>manifest.json")]
+    subgraph Actions["GitHub Actions"]
+        CI["ci.yml<br/>ruff, pytest,<br/>Docker and kind smoke tests"]
+        Deploy["deploy.yml<br/>quality gate: Recall@5 >= 0.90"]
+    end
+    GCS --> Deploy
+    Deploy --> AR[("Artifact Registry<br/>image tagged with git SHA")]
+    AR --> API
+    subgraph Run["Cloud Run, 0 to 3 instances"]
+        API["FastAPI + Gunicorn<br/>/ask /health /ready"]
+        Models["bge-small + FAISS index<br/>MiniLM cross-encoder<br/>baked into the image"]
+        API --- Models
+    end
+    User["Browser or client"] --> API
+    SM[("Secret Manager<br/>GROQ_API_KEY")] --> API
+    API -->|"generation"| Groq["Groq API<br/>llama-3.3-70b-versatile"]
+    API -->|"JSON logs"| Logging["Cloud Logging"]
+```
+
+### Run it locally
+
+The index artifacts go in `artifacts/index/`. Build them from the Kaggle CSVs, or download the deployed ones from GCS ([docs/gcp-setup.md](docs/gcp-setup.md), step 9, which also uploads a local build with `--upload-only`).
+
+```bash
+pip install torch --index-url https://download.pytorch.org/whl/cpu   # CPU wheel; skip on a GPU machine
+pip install -e ".[dev]"
+python scripts/build_index.py data/ --out-dir artifacts/index        # full corpus, must be 41,328 documents
+cp .env.example .env    # LLM_PROVIDER=fake needs no key; use groq + GROQ_API_KEY for real answers
+docker compose up --build
+```
+
+| URL | What |
+|---|---|
+| http://localhost:8080 | Question page; the API docs are at `/docs` |
+| http://localhost:9090 | Prometheus |
+| http://localhost:3000 | Grafana, with the provisioned "Movie RAG" dashboard |
+
+For a quick try without the dataset, `python scripts/build_index.py tests/fixtures/movies --expected-count 12` builds a 12-movie fixture index. Without Docker, run `gunicorn -c gunicorn.conf.py movie_rag.api:app` with `INDEX_DIR` and `LLM_PROVIDER` set. On macOS, also set `OMP_NUM_THREADS=1` and `KMP_DUPLICATE_LIB_OK=TRUE` for anything that loads the models: faiss and PyTorch each bundle their own OpenMP runtime, and two copies in one process crash. The Docker image runs Linux and is not affected.
+
+The notebook's interface is kept as a function:
+
+```python
+from movie_rag.pipeline import run_query
+
+run_query("Who directed Toy Story?")  # {"answer": "...", "retrieved_titles": [...]}; never raises
+```
+
+| Endpoint | Behavior |
+|---|---|
+| `POST /ask` | `{"question": "..."}`, 1 to 300 characters. Returns the answer, citations, the top 5 titles with re-rank scores and per-stage timings in ms. 422 for invalid input, 429 above 20 requests per minute per client IP, 503 if the LLM is unavailable |
+| `GET /health` | Liveness |
+| `GET /ready` | 200 once the models and the index are loaded |
+| `GET /metrics` | Prometheus metrics when `METRICS_PUBLIC=true` (set in docker compose); otherwise 404, as on Cloud Run |
+| `GET /` | Question page with example questions |
+
+All settings are environment variables ([movie_rag/config.py](movie_rag/config.py)); [.env.example](.env.example) lists the common ones. `WEB_CONCURRENCY` sets the number of Gunicorn workers, each with its own copy of the models. The rate limit is counted per worker. On Cloud Run (`TRUST_X_FORWARDED_FOR=true`) the client IP is the last `X-Forwarded-For` entry, the one Google's front end appends; elsewhere it is the socket address.
+
+### CI/CD
+
+[`ci.yml`](.github/workflows/ci.yml) runs on every push and pull request:
+
+1. `ruff check`, `ruff format --check` and `pytest`. The tests run offline with the fake generator, a hashing encoder and a 12-movie fixture corpus.
+2. Builds the Docker image with the fixture index and starts it with `LLM_PROVIDER=fake`. Waits for `/ready`, then checks `/health`, an answer from `/ask` and the refusal of a post-2017 question.
+3. Creates a kind cluster with metrics-server, loads the image, applies the manifests in `k8s/`, waits for the rollout and runs the same smoke test through a port-forward.
+
+[`deploy.yml`](.github/workflows/deploy.yml) runs on pushes to `main` and on manual dispatch:
+
+1. Authenticates to Google Cloud with Workload Identity Federation (no JSON key) and downloads the index from GCS.
+2. **Quality gate:** runs `scripts/eval_retrieval.py --min-recall 0.90` on the notebook's 16 answerable test queries. If re-ranked Recall@5 is below 0.90, nothing is built or deployed.
+3. Builds the image and pushes it to Artifact Registry, tagged with the git SHA.
+4. Deploys to Cloud Run: 2 GiB, 1 vCPU, concurrency 4, 0 to 3 instances, public, `GROQ_API_KEY` from Secret Manager, a dedicated runtime service account.
+5. Smoke-tests `/health` and `/ask` on the new URL and fails the run if either fails.
+
+The one-time Google Cloud and GitHub setup is in [docs/gcp-setup.md](docs/gcp-setup.md). Until its repository variables exist, the deploy job is skipped.
+
+### Monitoring
+
+| Metric | Meaning |
+|---|---|
+| `movie_rag_requests_total{endpoint, status}` | Request count by endpoint and HTTP status |
+| `movie_rag_request_latency_seconds{endpoint}` | Request latency histogram |
+| `movie_rag_stage_latency_seconds{stage}` | Retrieve, re-rank and generate stage histograms |
+| `movie_rag_refusals_total` | Answers that were refusals |
+| `movie_rag_errors_total{type}` | Errors: `generation_unavailable`, `rate_limited`, `pipeline`, `unhandled` |
+
+The Grafana dashboard ([monitoring/grafana/dashboards/movie-rag.json](monitoring/grafana/dashboards/movie-rag.json)) shows request rate, p50 and p95 latency, stage timings, refusal rate, error rate and errors by type. Every `/ask` also writes one JSON log line with the request id, latency, refusal flag and stage timings; the question text and the API key are never logged. On Cloud Run these lines are parsed by Cloud Logging. Prometheus and Grafana are part of the local stack only: on Cloud Run `METRICS_PUBLIC` is false, so `/metrics` returns 404.
+
+### Load testing
+
+[loadtest/README.md](loadtest/README.md) covers headless Locust runs against the local stack and against Cloud Run (for example 20 users, spawn rate 2, 5 minutes), and `scripts/summarize_loadtest.py` turns Locust's CSV into the table below. Raise `RATE_LIMIT_PER_MINUTE` for the duration of a test, because a single load generator counts as one client IP.
+
+### Service results
+
+Values are filled in from the scripts named in the last column; `TODO` means not measured yet.
+
+| Measurement | Value | Source |
+|---|---|---|
+| Documents in the index | 41,328 | `scripts/build_index.py` |
+| Re-ranked Recall@5 / MRR, 16 answerable queries (deployed index) | TODO | `scripts/eval_retrieval.py` (deploy quality gate) |
+| Refusals on the 4 unanswerable queries (Groq) | TODO | `scripts/eval_generation.py` |
+| Expected title cited on the 16 answerable queries (Groq) | TODO | `scripts/eval_generation.py` |
+| Docker image size | TODO | `docker image ls` in CI |
+| Cold start until `/ready` (model and index load) | TODO | `pipeline loaded` log line, `load_ms` |
+| `/ask` p50 / p95 / p99 latency, 20 users, 5 min (Cloud Run) | TODO | Locust + `scripts/summarize_loadtest.py` |
+| Requests per second and failure rate (same run) | TODO | Locust + `scripts/summarize_loadtest.py` |
+
+### Kubernetes (optional)
+
+`k8s/` holds a Deployment (startup and readiness probes on `/ready`, liveness on `/health`, CPU and memory requests and limits), a Service, a ConfigMap, a Secret template without values and a CPU-based HorizontalPodAutoscaler (1 to 3 replicas). CI tests them on kind with the fake provider. For a real cluster, point the image at Artifact Registry, create the Secret with `kubectl create secret generic movie-rag-secrets --from-literal=GROQ_API_KEY=...` and set `LLM_PROVIDER` to `groq` in the ConfigMap.
+
+### Service layout
+
+```
+movie_rag/            # config, preprocess, index, retrieve, generate, pipeline, metrics, api, static page
+scripts/              # build_index, eval_retrieval, eval_generation, smoke_test, summarize_loadtest
+tests/                # offline unit tests and the 12-movie fixture corpus
+loadtest/             # Locust user and instructions
+monitoring/           # Prometheus config, Grafana datasource and dashboard
+k8s/                  # optional Kubernetes manifests
+docs/gcp-setup.md     # one-time Google Cloud setup
+Dockerfile, docker-compose.yml, gunicorn.conf.py, .github/workflows/
+```
