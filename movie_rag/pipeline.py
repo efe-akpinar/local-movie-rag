@@ -5,6 +5,7 @@
 """
 
 import logging
+import os
 import time
 from dataclasses import dataclass, field
 
@@ -44,7 +45,7 @@ def _ms(seconds: float) -> float:
 
 
 class Pipeline:
-    def __init__(self, retriever: Retriever, generator: Generator, *, k: int = 20, n: int = 5):
+    def __init__(self, retriever: Retriever, generator: Generator, *, k: int = 10, n: int = 5):
         self.retriever = retriever
         self.generator = generator
         self.k = k
@@ -110,21 +111,24 @@ class Pipeline:
 def build_pipeline(settings: Settings | None = None) -> Pipeline:
     """Load the index, both encoders and the generator once."""
     from movie_rag import index as index_module
-    from movie_rag.retrieve import load_bi_encoder, load_cross_encoder
+    from movie_rag.logs import log_event
+    from movie_rag.retrieve import configure_torch_threads, cpu_limit, load_bi_encoder, load_cross_encoder
 
     settings = settings or get_settings()
+    threads = configure_torch_threads()
+    log_event(logger, "torch threads", torch_threads=threads, cpu_count=os.cpu_count(), cpu_limit=cpu_limit())
     device = settings.resolved_device()
     movie_index = index_module.load(settings.index_dir, expected_embedding_model=settings.embedding_model)
     retriever = Retriever(
         movie_index,
         load_bi_encoder(settings.embedding_model, device),
         load_cross_encoder(settings.cross_encoder_model, device),
-        k=settings.retrieve_k,
+        k=settings.rerank_pool,
         n=settings.rerank_n,
         cross_encoder_batch_size=settings.cross_encoder_batch_size,
     )
     retriever.self_check()
-    return Pipeline(retriever, make_generator(settings), k=settings.retrieve_k, n=settings.rerank_n)
+    return Pipeline(retriever, make_generator(settings), k=settings.rerank_pool, n=settings.rerank_n)
 
 
 _default_pipeline: Pipeline | None = None
