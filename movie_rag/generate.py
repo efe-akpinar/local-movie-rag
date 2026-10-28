@@ -1,7 +1,9 @@
 """Grounded answer generation with a pluggable LLM provider (groq, local, fake).
 
 The prompt, context format, year guard and answer post-processing are copied from the notebook
-(Section 5); only the model call differs between providers.
+(Section 5); only the model call differs between providers. The service adds formatting rules to the
+prompt (square-bracket citations, plain text, "<fact> [Title]" items) and a clean-up step for the
+formatting habits of hosted models.
 """
 
 import logging
@@ -26,8 +28,10 @@ Rules:
 1. Answer ONLY using the provided movie context.
 2. If the context does not contain enough evidence, answer exactly: "I don't have information about that in the provided context."
 3. Do not use outside knowledge, even if you know the movie.
-4. Cite every movie title you used in square brackets, for example [Toy Story].
+4. Cite every movie title you used in square brackets, for example [Toy Story]. Use only plain square brackets for citations.
 5. If the user asks about a movie released after July 2017, refuse unless that exact movie appears in the context.
+6. Answer in plain text, not markdown: no **bold**, no headings. Use "- " only to start list items, one item per line.
+7. Write each fact or list item as "<fact> [Title]": the title goes in the citation only, so do not restate it in the sentence.
 
 Refusal example:
 Question: Who directed Oppenheimer (2023)?
@@ -46,6 +50,10 @@ REFUSAL_MARKERS = [
 _CITATION_RE = re.compile(r"\[([^\[\]]+)\]")
 _THINK_RE = re.compile(r"<think>.*?(?:</think>|\Z)", re.DOTALL | re.IGNORECASE)
 _THINK_CLOSE_RE = re.compile(r"</think>", re.IGNORECASE)
+# No-break, thin, narrow and other fixed-width spaces some models emit instead of U+0020.
+_ODD_SPACE_RE = re.compile(r"[   -   　]")
+_FULLWIDTH_GLUED_RE = re.compile(r"(?<=[^\s(\[])【")
+_ADJACENT_DUPLICATE_RE = re.compile(r"\[([^\[\]]+)\](?:[ \t]*\[\1\])+")
 
 
 class GenerationUnavailable(RuntimeError):
@@ -96,8 +104,21 @@ def build_messages(query: str, contexts, system_prompt: str = STRICT_SYSTEM_PROM
     ]
 
 
+def clean_answer(answer: str) -> str:
+    """Normalize formatting: 【Title】 -> [Title], repeated adjacent citations, ** and __, odd spaces.
+
+    Line breaks are kept, so "- " list items stay on their own lines.
+    """
+    text = _ODD_SPACE_RE.sub(" ", answer or "")
+    text = _FULLWIDTH_GLUED_RE.sub(" 【", text).replace("【", "[").replace("】", "]")
+    text = text.replace("**", "").replace("__", "")
+    text = _ADJACENT_DUPLICATE_RE.sub(r"[\1]", text)
+    lines = [re.sub(r" {2,}", " ", line).strip(" ") for line in text.split("\n")]
+    return "\n".join(lines).strip()
+
+
 def postprocess_answer(answer: str, contexts) -> str:
-    answer = (answer or "").strip()
+    answer = clean_answer(answer)
     if not answer:
         return REFUSAL_TEXT
     if REFUSAL_TEXT.lower() in answer.lower():

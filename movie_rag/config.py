@@ -15,7 +15,9 @@ class Settings(BaseSettings):
     index_dir: Path = Path("artifacts/index")
     embedding_model: str = "BAAI/bge-small-en-v1.5"
     cross_encoder_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
-    retrieve_k: int = 20
+    # Bi-encoder candidates sent to the cross-encoder. The notebook's Ablation B found the same Recall@5
+    # with 10 as with 20 (the notebook's setting), at lower re-rank latency.
+    rerank_pool: int = 10
     rerank_n: int = 5
     embed_batch_size: int = 128
     cross_encoder_batch_size: int = 32

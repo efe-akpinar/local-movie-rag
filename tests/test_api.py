@@ -104,6 +104,9 @@ def test_index_page(client):
     response = client.get("/")
     assert response.status_code == 200 and response.headers["content-type"].startswith("text/html")
     assert 'id="question"' in response.text and "Oppenheimer (2023)" in response.text
+    # Answers are shown as text, never parsed as HTML, with "- " list items on their own lines.
+    assert "answerEl.textContent = data.answer" in response.text and "innerHTML" not in response.text
+    assert "white-space: pre-line" in response.text
 
 
 def test_cors_is_closed_by_default_and_opens_only_for_listed_origins(client, make_client):

@@ -7,6 +7,7 @@ from movie_rag.generate import (
     GenerationUnavailable,
     GroqGenerator,
     build_messages,
+    clean_answer,
     is_refusal,
     make_generator,
     mentions_post_cutoff_year,
@@ -179,3 +180,48 @@ def test_groq_defaults_leave_room_for_reasoning():
     generator = make_generator(Settings(llm_provider="groq", groq_api_key="gsk_test_secret"))
     assert generator.model == "openai/gpt-oss-120b"
     assert generator.max_tokens == 1024
+
+
+# ---------------------------------------------------------------- answer clean-up
+
+
+def test_fullwidth_citations_become_square_brackets_without_adjacent_duplicates():
+    assert postprocess_answer("John Lasseter【Toy Story】 [Toy Story]", CONTEXTS) == "John Lasseter [Toy Story]"
+    assert clean_answer("John Lasseter [Toy Story][Toy Story] [Toy Story]") == "John Lasseter [Toy Story]"
+    assert parse_citations(postprocess_answer("John Lasseter【Toy Story】", CONTEXTS)) == ["Toy Story"]
+
+
+def test_only_adjacent_duplicates_of_the_same_title_are_dropped():
+    assert clean_answer("A [Toy Story] [Toy Story 2]") == "A [Toy Story] [Toy Story 2]"
+    assert clean_answer("A [Toy Story]. B [Toy Story].") == "A [Toy Story]. B [Toy Story]."
+    assert clean_answer("- A [Toy Story]\n- B [Toy Story]") == "- A [Toy Story]\n- B [Toy Story]"
+
+
+def test_odd_spaces_are_normalized_and_collapsed():
+    answer = "John Lasseter directed it.   [Toy Story]"
+    assert clean_answer(answer) == "John Lasseter directed it. [Toy Story]"
+
+
+def test_markdown_bold_is_stripped_from_list_answers():
+    contexts = [{"title": "The Empire Strikes Back"}, {"title": "Return of the Jedi"}]
+    answer = (
+        "- **The Empire Strikes Back** – Darth Vader reveals he is Luke's father. [The Empire Strikes Back]\n"
+        "- __Return of the Jedi__ – Luke confronts the Emperor. [Return of the Jedi]"
+    )
+    cleaned = postprocess_answer(answer, contexts)
+    assert cleaned == (
+        "- The Empire Strikes Back – Darth Vader reveals he is Luke's father. [The Empire Strikes Back]\n"
+        "- Return of the Jedi – Luke confronts the Emperor. [Return of the Jedi]"
+    )
+    assert parse_citations(cleaned, [c["title"] for c in contexts]) == ["The Empire Strikes Back", "Return of the Jedi"]
+
+
+def test_single_asterisks_in_titles_survive():
+    assert clean_answer("Robert Altman directed it. [M*A*S*H]") == "Robert Altman directed it. [M*A*S*H]"
+
+
+def test_prompt_asks_for_plain_text_bracket_citations_and_fact_title_items():
+    assert "Use only plain square brackets for citations." in STRICT_SYSTEM_PROMPT
+    assert "plain text, not markdown" in STRICT_SYSTEM_PROMPT
+    assert 'Use "- " only to start list items' in STRICT_SYSTEM_PROMPT
+    assert '"<fact> [Title]"' in STRICT_SYSTEM_PROMPT

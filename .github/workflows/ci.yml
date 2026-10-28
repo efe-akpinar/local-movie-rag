@@ -73,6 +73,11 @@ jobs:
         run: |
           docker image ls movie-rag:ci
           test "$(docker inspect --format '{{.Config.User}}' movie-rag:ci)" = "app"
+      - name: Torch uses every CPU in the container (no CPU limit set)
+        run: |
+          threads="$(docker logs movie-rag 2>&1 | grep -o '"torch_threads": [0-9]*' | grep -o '[0-9]*$' | head -1)"
+          echo "torch threads: ${threads:-not logged}, runner CPUs: $(nproc)"
+          test "$threads" = "$(nproc)"
       - name: Container logs
         if: always()
         run: docker logs movie-rag || true
@@ -122,6 +127,11 @@ jobs:
           kubectl port-forward service/movie-rag 8080:80 > /tmp/port-forward.log 2>&1 &
           sleep 5
           python3 scripts/smoke_test.py http://localhost:8080 --wait 60
+      - name: Torch threads follow the pod's CPU limit (1)
+        run: |
+          threads="$(kubectl logs deployment/movie-rag | grep -o '"torch_threads": [0-9]*' | grep -o '[0-9]*$' | head -1)"
+          echo "torch threads: ${threads:-not logged}, node CPUs: $(nproc)"
+          test "$threads" = "1"
       - name: HPA status
         run: kubectl get hpa movie-rag
       - name: Diagnostics

@@ -33,7 +33,6 @@ ENV PATH=/opt/venv/bin:$PATH \
     HF_HUB_OFFLINE=1 \
     TRANSFORMERS_OFFLINE=1 \
     TOKENIZERS_PARALLELISM=false \
-    OMP_NUM_THREADS=1 \
     INDEX_DIR=/app/index \
     PORT=8080 \
     WEB_CONCURRENCY=1 \

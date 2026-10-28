@@ -1,6 +1,9 @@
 """Bi-encoder retrieval and cross-encoder re-ranking, copied from the notebook (Sections 3 and 4)."""
 
+import math
+import os
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Protocol
 
 import numpy as np
@@ -33,6 +36,33 @@ def align_parameters(module) -> int:
             param.data = param.data.clone()
             moved += 1
     return moved
+
+
+def cpu_limit(cgroup_cpu_max: Path = Path("/sys/fs/cgroup/cpu.max")) -> int:
+    """CPUs this process may use: os.cpu_count(), capped by the affinity mask and a cgroup v2 CPU quota.
+
+    In a container os.cpu_count() reports the host's CPUs, not the container's limit (a Kubernetes CPU
+    limit, docker run --cpus), so the quota cap keeps torch from starting more threads than it gets.
+    """
+    count = os.cpu_count() or 1
+    if hasattr(os, "sched_getaffinity"):
+        count = min(count, len(os.sched_getaffinity(0)))
+    try:
+        quota, period = cgroup_cpu_max.read_text().split()[:2]
+        if quota != "max":
+            count = min(count, max(1, math.ceil(int(quota) / int(period))))
+    except (OSError, ValueError):
+        pass
+    return count
+
+
+def configure_torch_threads() -> int:
+    """Let torch use every CPU the container may use, unless OMP_NUM_THREADS pins the count. Returns it."""
+    import torch
+
+    if not os.environ.get("OMP_NUM_THREADS"):
+        torch.set_num_threads(cpu_limit())
+    return torch.get_num_threads()
 
 
 def load_bi_encoder(model_name: str, device: str) -> Encoder:
@@ -68,7 +98,7 @@ class Retriever:
         bi_encoder: Encoder,
         cross_encoder: PairScorer,
         *,
-        k: int = 20,
+        k: int = 10,  # bi-encoder candidates sent to the cross-encoder (RERANK_POOL)
         n: int = 5,
         cross_encoder_batch_size: int = 32,
     ):

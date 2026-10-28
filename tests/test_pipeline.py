@@ -104,3 +104,59 @@ def test_align_parameters_moves_only_misaligned_tensors_and_keeps_values():
     moved = align_parameters(module)
     assert moved >= 1 and module.weight.data_ptr() % 64 == 0
     assert torch.equal(module.weight.detach(), before)
+
+
+def test_rerank_pool_sets_how_many_candidates_reach_the_cross_encoder(movie_index):
+    from movie_rag.generate import FakeGenerator
+    from movie_rag.retrieve import Retriever
+    from tests.conftest import HashingEncoder, OverlapScorer
+
+    class CountingScorer(OverlapScorer):
+        def predict(self, pairs, **kwargs):
+            self.pairs = len(pairs)
+            return super().predict(pairs, **kwargs)
+
+    scorer = CountingScorer()
+    pipeline = Pipeline(Retriever(movie_index, HashingEncoder(), scorer), FakeGenerator())
+    assert len(pipeline.answer("Who directed Toy Story?").retrieved) == 5
+    assert scorer.pairs == 10  # the default pool, out of the 12 fixture movies
+
+
+def test_rerank_pool_defaults_to_10_and_reads_the_environment(monkeypatch):
+    from movie_rag.config import Settings
+
+    assert Settings().rerank_pool == 10
+    monkeypatch.setenv("RERANK_POOL", "20")
+    assert Settings().rerank_pool == 20
+
+
+def test_cpu_limit_is_capped_by_the_cgroup_quota(tmp_path, monkeypatch):
+    from movie_rag.retrieve import cpu_limit
+
+    monkeypatch.setattr("os.cpu_count", lambda: 8)
+    monkeypatch.delattr("os.sched_getaffinity", raising=False)
+    cpu_max = tmp_path / "cpu.max"
+    cpu_max.write_text("max 100000\n")
+    assert cpu_limit(cpu_max) == 8
+    cpu_max.write_text("150000 100000\n")
+    assert cpu_limit(cpu_max) == 2  # 1.5 CPUs rounds up
+    cpu_max.write_text("100000 100000\n")
+    assert cpu_limit(cpu_max) == 1
+    assert cpu_limit(tmp_path / "missing") == 8
+
+
+def test_torch_threads_follow_the_cpu_limit_unless_omp_num_threads_is_set(monkeypatch):
+    import pytest
+
+    torch = pytest.importorskip("torch")
+    from movie_rag import retrieve
+
+    calls = []
+    monkeypatch.setattr(torch, "set_num_threads", calls.append)
+    monkeypatch.setattr(retrieve, "cpu_limit", lambda: 3)
+    monkeypatch.setenv("OMP_NUM_THREADS", "1")
+    retrieve.configure_torch_threads()
+    assert calls == []
+    monkeypatch.delenv("OMP_NUM_THREADS")
+    retrieve.configure_torch_threads()
+    assert calls == [3]

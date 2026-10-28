@@ -145,7 +145,18 @@ A local NVIDIA GPU with CUDA matches the Colab setup. On a CPU-only machine, inc
 
 The notebook remains the record of the original experiments. The same pipeline also runs as a web service: the `movie_rag/` package, a FastAPI app served by Gunicorn in Docker, CI/CD to Google Cloud Run behind a retrieval-quality gate, Prometheus and Grafana monitoring, Locust load tests and optional Kubernetes manifests.
 
-**Hosted generation uses Groq.** The deployed service generates answers with Groq (`openai/gpt-oss-120b`, temperature 0, set by the `GROQ_MODEL` repository variable) instead of the local 4-bit Qwen2.5-3B used in the notebook. Only the model's final answer is used; its reasoning is discarded. Everything around the LLM call is the notebook's code: preprocessing, `bge-small` + FAISS retrieval of the top 20, cross-encoder re-ranking to the top 5, the strict grounded prompt, the exact refusal string, `[Title]` citations and the post-2017 year guard. `LLM_PROVIDER=local` runs Qwen2.5-3B on a GPU, and `LLM_PROVIDER=fake` is a deterministic stand-in for tests.
+**Hosted generation uses Groq.** The deployed service generates answers with Groq (`openai/gpt-oss-120b`, temperature 0, set by the `GROQ_MODEL` repository variable) instead of the local 4-bit Qwen2.5-3B used in the notebook. Only the model's final answer is used; its reasoning is discarded. Everything around the LLM call is the notebook's code: preprocessing, `bge-small` + FAISS retrieval, cross-encoder re-ranking to the top 5, the strict grounded prompt, the exact refusal string, `[Title]` citations and the post-2017 year guard. Two things differ from the notebook: the re-rank pool and the answer formatting, both described below. `LLM_PROVIDER=local` runs Qwen2.5-3B on a GPU, and `LLM_PROVIDER=fake` is a deterministic stand-in for tests.
+
+**Re-rank pool of 10.** The service sends the bi-encoder's top 10 candidates to the cross-encoder (`RERANK_POOL`) instead of the notebook's 20. The notebook's Ablation B found the same Recall@5 for both, and `scripts/eval_retrieval.py` reproduces that on the full 41,328-movie index with less than half the re-rank time:
+
+| Re-rank pool | Recall@5 | MRR | Median re-rank time per query |
+|---|---|---|---|
+| 10 (service) | 0.9375 | 0.7240 | 140.1 ms |
+| 20 (notebook) | 0.9375 | 0.7188 | 326.9 ms |
+
+Recall@5 and MRR are over the 16 answerable test queries and match the notebook's Ablation B. The times are from an Apple M3 CPU with one torch thread (macOS needs `OMP_NUM_THREADS=1`, see "Run it locally"). In the container, torch uses every CPU it may use: the CPU count, capped by a container CPU limit, unless `OMP_NUM_THREADS` is set.
+
+**Answer formatting.** The prompt adds three rules to the notebook's: cite with plain square brackets only, answer in plain text without markdown (with `- ` for list items), and write each item as `<fact> [Title]` without restating the title. A clean-up step also converts `【Title】` citations to `[Title]`, drops a citation repeated right after itself, strips leftover `**` and `__`, and replaces non-standard spaces. The question page shows answers as plain text, with list items on separate lines.
 
 ### Architecture
 
@@ -216,8 +227,8 @@ All settings are environment variables ([movie_rag/config.py](movie_rag/config.p
 [`ci.yml`](.github/workflows/ci.yml) runs on every push and pull request:
 
 1. `ruff check`, `ruff format --check` and `pytest`. The tests run offline with the fake generator, a hashing encoder and a 12-movie fixture corpus.
-2. Builds the Docker image with the fixture index and starts it with `LLM_PROVIDER=fake`. Waits for `/ready`, then checks `/health`, an answer from `/ask` and the refusal of a post-2017 question.
-3. Creates a kind cluster with metrics-server, loads the image, applies the manifests in `k8s/`, waits for the rollout and runs the same smoke test through a port-forward.
+2. Builds the Docker image with the fixture index and starts it with `LLM_PROVIDER=fake`. Waits for `/ready`, then checks `/health`, an answer from `/ask` and the refusal of a post-2017 question. Also checks that torch uses all of the runner's CPUs inside the container.
+3. Creates a kind cluster with metrics-server, loads the image, applies the manifests in `k8s/`, waits for the rollout and runs the same smoke test through a port-forward. Also checks that torch uses one thread, matching the pod's CPU limit.
 
 [`deploy.yml`](.github/workflows/deploy.yml) runs on pushes to `main` and on manual dispatch:
 
