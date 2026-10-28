@@ -5,7 +5,12 @@ data/
 *.npy
 *.pkl
 
-# Generated indexes and model artifacts
+# Tiny hand-written fixture corpus used by tests and CI
+!tests/fixtures/movies/*.csv
+
+# Generated indexes, evaluation output and model artifacts
+artifacts/
+results/
 rag_indexes/
 *.faiss
 *.bin
@@ -18,6 +23,7 @@ checkpoint-*/
 # Secrets
 .env
 .env.*
+!.env.example
 google-services.json
 GoogleService-Info.plist
 
@@ -27,6 +33,10 @@ __pycache__/
 .ipynb_checkpoints/
 .venv/
 venv/
+*.egg-info/
+build/
+.pytest_cache/
+.ruff_cache/
 
 # OS / editors
 .DS_Store
