@@ -24,6 +24,7 @@ env:
   AR_REPO: ${{ vars.AR_REPO }}
   INDEX_BUCKET: ${{ vars.INDEX_BUCKET }}
   SERVICE_NAME: ${{ vars.SERVICE_NAME }}
+  GROQ_MODEL: ${{ vars.GROQ_MODEL || 'openai/gpt-oss-120b' }} # optional; change it when Groq retires a model
   GROQ_SECRET: groq-api-key # Secret Manager secret name (docs/gcp-setup.md)
 
 jobs:
@@ -94,7 +95,7 @@ jobs:
           image: ${{ env.IMAGE }}
           env_vars: |
             LLM_PROVIDER=groq
-            GROQ_MODEL=llama-3.3-70b-versatile
+            GROQ_MODEL=${{ env.GROQ_MODEL }}
             TRUST_X_FORWARDED_FOR=true
             METRICS_PUBLIC=false
           secrets: |

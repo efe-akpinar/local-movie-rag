@@ -86,7 +86,7 @@ def groq_with(responses, sleeps=None):
     client = httpx.Client(transport=httpx.MockTransport(handler))
     generator = GroqGenerator(
         api_key="gsk_test_secret",
-        model="llama-3.3-70b-versatile",
+        model="openai/gpt-oss-120b",
         client=client,
         sleep=(sleeps.append if sleeps is not None else lambda _s: None),
     )
@@ -104,7 +104,7 @@ def test_groq_success_sends_temperature_zero_and_bearer_key():
     body = httpx.Response(200, content=request.content).json()
     assert request.url == "https://api.groq.com/openai/v1/chat/completions"
     assert request.headers["authorization"] == "Bearer gsk_test_secret"
-    assert body["temperature"] == 0 and body["model"] == "llama-3.3-70b-versatile"
+    assert body["temperature"] == 0 and body["model"] == "openai/gpt-oss-120b"
 
 
 @pytest.mark.parametrize("status", [429, 500, 503])

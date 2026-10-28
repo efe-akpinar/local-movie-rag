@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     # Generation
     llm_provider: Literal["groq", "local", "fake"] = "groq"
     groq_api_key: SecretStr | None = None
-    groq_model: str = "llama-3.3-70b-versatile"
+    groq_model: str = "openai/gpt-oss-120b"
     groq_base_url: str = "https://api.groq.com/openai/v1"
     groq_timeout_s: float = 20.0
     local_model: str = "Qwen/Qwen2.5-3B-Instruct"
