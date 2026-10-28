@@ -93,11 +93,13 @@ jobs:
           service: ${{ env.SERVICE_NAME }}
           region: ${{ env.GCP_REGION }}
           image: ${{ env.IMAGE }}
+          # OMP_NUM_THREADS must match --cpu: Cloud Run shows the container more CPUs than it gets.
           env_vars: |
             LLM_PROVIDER=groq
             GROQ_MODEL=${{ env.GROQ_MODEL }}
             TRUST_X_FORWARDED_FOR=true
             METRICS_PUBLIC=false
+            OMP_NUM_THREADS=1
           secrets: |
             GROQ_API_KEY=${{ env.GROQ_SECRET }}:latest
           flags: >-
