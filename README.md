@@ -156,6 +156,8 @@ The notebook remains the record of the original experiments. The same pipeline a
 
 Recall@5 and MRR are over the 16 answerable test queries and match the notebook's Ablation B. The times are from an Apple M3 CPU with one torch thread (macOS needs `OMP_NUM_THREADS=1`, see "Run it locally"). In the container, torch uses every CPU it may use: the CPU count, capped by a container CPU limit, unless `OMP_NUM_THREADS` is set.
 
+**One torch thread on Cloud Run.** On a 1-vCPU service, Cloud Run reports 2 CPUs to the container and sets no cgroup quota, so torch started 2 threads that competed for one core. The deploy now sets `OMP_NUM_THREADS=1` to match `--cpu=1`. That cut the re-rank time from about 1.5–2.2 s to about 0.93 s (revision `movie-rag-00005-q9c`, 3 warm requests for "Who directed Toy Story?"; see "Service results").
+
 **Answer formatting.** The prompt adds three rules to the notebook's: cite with plain square brackets only, answer in plain text without markdown (with `- ` for list items), and write each item as `<fact> [Title]` without restating the title. A clean-up step also converts `【Title】` citations to `[Title]`, drops a citation repeated right after itself, strips leftover `**` and `__`, and replaces non-standard spaces. The question page shows answers as plain text, with list items on separate lines.
 
 ### Architecture
@@ -235,7 +237,7 @@ All settings are environment variables ([movie_rag/config.py](movie_rag/config.p
 1. Authenticates to Google Cloud with Workload Identity Federation (no JSON key) and downloads the index from GCS.
 2. **Quality gate:** runs `scripts/eval_retrieval.py --min-recall 0.90` on the notebook's 16 answerable test queries. If re-ranked Recall@5 is below 0.90, nothing is built or deployed.
 3. Builds the image and pushes it to Artifact Registry, tagged with the git SHA.
-4. Deploys to Cloud Run: 2 GiB, 1 vCPU, concurrency 4, 0 to 3 instances, public, `GROQ_API_KEY` from Secret Manager, a dedicated runtime service account.
+4. Deploys to Cloud Run: 2 GiB, 1 vCPU with one torch thread (`OMP_NUM_THREADS=1`), concurrency 4, 0 to 3 instances, public, `GROQ_API_KEY` from Secret Manager, a dedicated runtime service account.
 5. Smoke-tests `/health` and `/ask` on the new URL and fails the run if either fails.
 
 The one-time Google Cloud and GitHub setup is in [docs/gcp-setup.md](docs/gcp-setup.md). Until its repository variables exist, the deploy job is skipped.
@@ -268,6 +270,7 @@ Values are filled in from the scripts named in the last column; `TODO` means not
 | Expected title cited on the 16 answerable queries (Groq) | TODO | `scripts/eval_generation.py` |
 | Docker image size | TODO | `docker image ls` in CI |
 | Cold start until `/ready` (model and index load) | TODO | `pipeline loaded` log line, `load_ms` |
+| `/ask` stage times for "Who directed Toy Story?", 3 requests, warm instance (Cloud Run, revision `movie-rag-00005-q9c`, `OMP_NUM_THREADS=1`) | retrieve 27–29 ms, rerank 903–952 ms, generate 342–528 ms, total 1,322–1,483 ms | `timings_ms` in the `/ask` response |
 | `/ask` p50 / p95 / p99 latency, 20 users, 5 min (Cloud Run) | TODO | Locust + `scripts/summarize_loadtest.py` |
 | Requests per second and failure rate (same run) | TODO | Locust + `scripts/summarize_loadtest.py` |
 
