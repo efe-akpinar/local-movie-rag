@@ -44,6 +44,8 @@ REFUSAL_MARKERS = [
 ]
 
 _CITATION_RE = re.compile(r"\[([^\[\]]+)\]")
+_THINK_RE = re.compile(r"<think>.*?(?:</think>|\Z)", re.DOTALL | re.IGNORECASE)
+_THINK_CLOSE_RE = re.compile(r"</think>", re.IGNORECASE)
 
 
 class GenerationUnavailable(RuntimeError):
@@ -106,6 +108,16 @@ def postprocess_answer(answer: str, contexts) -> str:
     return answer
 
 
+def strip_think(text: str) -> str:
+    """Remove <think>...</think> reasoning so titles mentioned while reasoning are not taken as citations.
+
+    Also handles a block cut off by the token limit, and output that has only the closing tag because
+    the chat template opened the block in the prompt.
+    """
+    text = _THINK_RE.sub("", text or "")
+    return _THINK_CLOSE_RE.split(text)[-1].strip()
+
+
 def is_refusal(answer: str) -> bool:
     lower = str(answer).lower()
     return any(marker in lower for marker in REFUSAL_MARKERS)
@@ -152,7 +164,11 @@ class FakeGenerator:
 
 
 class GroqGenerator:
-    """Groq's OpenAI-compatible chat completions API, temperature 0, one retry on 429 and 5xx."""
+    """Groq's OpenAI-compatible chat completions API, temperature 0, one retry on 429 and 5xx.
+
+    Only ``message.content`` is used. Reasoning models return their reasoning in a separate field
+    (``message.reasoning`` for gpt-oss), which is ignored, or inline in <think> tags, which are stripped.
+    """
 
     name = "groq"
 
@@ -162,7 +178,7 @@ class GroqGenerator:
         model: str,
         base_url: str = "https://api.groq.com/openai/v1",
         timeout_s: float = 20.0,
-        max_tokens: int = 180,
+        max_tokens: int = 1024,
         client: httpx.Client | None = None,
         sleep: Callable[[float], None] = time.sleep,
     ):
@@ -202,9 +218,17 @@ class GroqGenerator:
             if status >= 400:
                 raise GenerationUnavailable(f"Groq returned {status}")
             try:
-                return response.json()["choices"][0]["message"]["content"] or ""
-            except (ValueError, KeyError, IndexError, TypeError) as exc:
+                choice = response.json()["choices"][0]
+                content = choice["message"].get("content") or ""
+            except (ValueError, KeyError, IndexError, TypeError, AttributeError) as exc:
                 raise GenerationUnavailable("Groq returned an unexpected response body") from exc
+            answer = strip_think(content)
+            if not answer:
+                # Usually the token budget ran out while the model was still reasoning. Fail loudly:
+                # post-processing would otherwise turn the empty answer into an ordinary-looking refusal.
+                finish_reason = choice.get("finish_reason")
+                raise GenerationUnavailable(f"Groq returned no answer text (finish_reason={finish_reason})")
+            return answer
         raise GenerationUnavailable("Groq request failed")  # unreachable; keeps type checkers happy
 
 
@@ -287,5 +311,5 @@ def make_generator(settings: Settings) -> Generator:
         model=settings.groq_model,
         base_url=settings.groq_base_url,
         timeout_s=settings.groq_timeout_s,
-        max_tokens=settings.max_new_tokens,
+        max_tokens=settings.groq_max_tokens,
     )

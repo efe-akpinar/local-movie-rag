@@ -156,6 +156,13 @@ gh variable set SERVICE_NAME   --repo "$GITHUB_REPO" --body "$SERVICE_NAME"
 
 The deploy workflow is skipped until `GCP_PROJECT_ID` is set, and fails with a clear message if any other variable is missing.
 
+`GROQ_MODEL` is optional. Without it the service uses `openai/gpt-oss-120b`. When Groq retires a model (requests then fail with HTTP 404 and `/ask` returns 503), pick a current one from [console.groq.com/docs/models](https://console.groq.com/docs/models), set it and redeploy. No code change is needed:
+
+```bash
+gh variable set GROQ_MODEL --repo "$GITHUB_REPO" --body "openai/gpt-oss-120b"
+gh workflow run deploy.yml --repo "$GITHUB_REPO" --ref main
+```
+
 ## 9. Upload the index
 
 The deploy workflow downloads `gs://$INDEX_BUCKET/index/{index.faiss,records.jsonl,manifest.json}`. If you already built the index locally into `artifacts/index/`, upload those files without rebuilding:

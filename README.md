@@ -145,7 +145,7 @@ A local NVIDIA GPU with CUDA matches the Colab setup. On a CPU-only machine, inc
 
 The notebook remains the record of the original experiments. The same pipeline also runs as a web service: the `movie_rag/` package, a FastAPI app served by Gunicorn in Docker, CI/CD to Google Cloud Run behind a retrieval-quality gate, Prometheus and Grafana monitoring, Locust load tests and optional Kubernetes manifests.
 
-**Hosted generation uses Groq.** The deployed service generates answers with Groq (`llama-3.3-70b-versatile`, temperature 0) instead of the local 4-bit Qwen2.5-3B used in the notebook. Everything around the LLM call is the notebook's code: preprocessing, `bge-small` + FAISS retrieval of the top 20, cross-encoder re-ranking to the top 5, the strict grounded prompt, the exact refusal string, `[Title]` citations and the post-2017 year guard. `LLM_PROVIDER=local` runs Qwen2.5-3B on a GPU, and `LLM_PROVIDER=fake` is a deterministic stand-in for tests.
+**Hosted generation uses Groq.** The deployed service generates answers with Groq (`openai/gpt-oss-120b`, temperature 0, set by the `GROQ_MODEL` repository variable) instead of the local 4-bit Qwen2.5-3B used in the notebook. Only the model's final answer is used; its reasoning is discarded. Everything around the LLM call is the notebook's code: preprocessing, `bge-small` + FAISS retrieval of the top 20, cross-encoder re-ranking to the top 5, the strict grounded prompt, the exact refusal string, `[Title]` citations and the post-2017 year guard. `LLM_PROVIDER=local` runs Qwen2.5-3B on a GPU, and `LLM_PROVIDER=fake` is a deterministic stand-in for tests.
 
 ### Architecture
 
@@ -169,7 +169,7 @@ flowchart LR
     end
     User["Browser or client"] --> API
     SM[("Secret Manager<br/>GROQ_API_KEY")] --> API
-    API -->|"generation"| Groq["Groq API<br/>llama-3.3-70b-versatile"]
+    API -->|"generation"| Groq["Groq API<br/>openai/gpt-oss-120b"]
     API -->|"JSON logs"| Logging["Cloud Logging"]
 ```
 

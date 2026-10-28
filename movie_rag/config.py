@@ -24,9 +24,12 @@ class Settings(BaseSettings):
     # Generation
     llm_provider: Literal["groq", "local", "fake"] = "groq"
     groq_api_key: SecretStr | None = None
-    groq_model: str = "llama-3.3-70b-versatile"
+    groq_model: str = "openai/gpt-oss-120b"
     groq_base_url: str = "https://api.groq.com/openai/v1"
     groq_timeout_s: float = 20.0
+    # Completion budget for Groq. Reasoning models such as gpt-oss spend part of it on reasoning before
+    # the answer, so it is larger than the notebook's 180 new tokens (still used for the local model).
+    groq_max_tokens: int = 1024
     local_model: str = "Qwen/Qwen2.5-3B-Instruct"
     local_cpu_fallback_model: str = "Qwen/Qwen2.5-0.5B-Instruct"
     max_new_tokens: int = 180
