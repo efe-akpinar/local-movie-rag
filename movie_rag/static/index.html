@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Movie Q&amp;A</title>
+  <style>
+    :root {
+      --bg: #fafaf9; --surface: #ffffff; --text: #1c1917; --muted: #57534e;
+      --border: #e7e5e4; --accent: #1d4ed8; --accent-text: #ffffff; --warn: #92400e;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #1c1917; --surface: #292524; --text: #f5f5f4; --muted: #a8a29e;
+        --border: #44403c; --accent: #60a5fa; --accent-text: #0c0a09; --warn: #fbbf24;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; background: var(--bg); color: var(--text);
+      font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+    }
+    main { max-width: 760px; margin: 0 auto; padding: 32px 16px 64px; }
+    h1 { font-size: 1.6rem; margin: 0 0 4px; }
+    .lede { color: var(--muted); margin: 0 0 24px; }
+    form { display: flex; gap: 8px; }
+    label.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+    input[type=text] {
+      flex: 1; min-width: 0; padding: 10px 12px; font: inherit; color: var(--text);
+      background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+    }
+    button {
+      font: inherit; cursor: pointer; border-radius: 8px; padding: 10px 16px;
+      border: 1px solid var(--accent); background: var(--accent); color: var(--accent-text);
+    }
+    button:disabled { opacity: 0.6; cursor: progress; }
+    .examples { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0 28px; }
+    .examples button {
+      background: transparent; color: var(--text); border-color: var(--border);
+      padding: 6px 10px; font-size: 0.9rem;
+    }
+    .card {
+      background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+      padding: 16px 20px; margin-bottom: 16px;
+    }
+    .card h2 { font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); margin: 0 0 8px; }
+    #answer { font-size: 1.1rem; margin: 0; white-space: pre-wrap; }
+    #answer.refused, #status.error { color: var(--warn); }
+    ol { margin: 0; padding-left: 1.4rem; }
+    li { margin: 2px 0; }
+    .score, .timings, #status { color: var(--muted); font-size: 0.9rem; }
+    [hidden] { display: none !important; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Movie Q&amp;A</h1>
+  <p class="lede">Answers come only from a corpus of 41,328 movies released before August 2017, with cited titles.</p>
+
+  <form id="ask-form">
+    <label class="sr" for="question">Question</label>
+    <input id="question" name="question" type="text" maxlength="300" required
+           placeholder="Ask about a movie, e.g. Who directed Toy Story?" autocomplete="off">
+    <button id="submit" type="submit">Ask</button>
+  </form>
+
+  <div class="examples" aria-label="Example questions">
+    <button type="button">Who directed Toy Story?</button>
+    <button type="button">What movie is about a shark terrorizing Amity Island?</button>
+    <button type="button">Which movie features a clownfish named Nemo?</button>
+    <button type="button">What is the plot of The Godfather?</button>
+    <button type="button">Who directed Oppenheimer (2023)?</button>
+  </div>
+
+  <p id="status" role="status" aria-live="polite"></p>
+
+  <section id="result" hidden>
+    <div class="card">
+      <h2>Answer</h2>
+      <p id="answer"></p>
+    </div>
+    <div class="card">
+      <h2>Retrieved titles (re-ranked)</h2>
+      <ol id="titles"></ol>
+      <p class="timings" id="timings"></p>
+    </div>
+  </section>
+</main>
+<script>
+  const form = document.getElementById("ask-form");
+  const input = document.getElementById("question");
+  const submit = document.getElementById("submit");
+  const statusEl = document.getElementById("status");
+  const resultEl = document.getElementById("result");
+  const answerEl = document.getElementById("answer");
+  const titlesEl = document.getElementById("titles");
+  const timingsEl = document.getElementById("timings");
+
+  document.querySelectorAll(".examples button").forEach((button) => {
+    button.addEventListener("click", () => { input.value = button.textContent; form.requestSubmit(); });
+  });
+
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const question = input.value.trim();
+    if (!question) return;
+    submit.disabled = true;
+    statusEl.className = "";
+    statusEl.textContent = "Searching…";
+    try {
+      const response = await fetch("/ask", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ question }),
+      });
+      const data = await response.json();
+      if (!response.ok && !data.answer) {
+        const detail = typeof data.detail === "string" ? data.detail : "Request failed.";
+        throw new Error(response.status === 429 ? "Too many requests. Please wait a moment." : detail);
+      }
+      answerEl.textContent = data.answer;
+      answerEl.className = data.refused ? "refused" : "";
+      titlesEl.replaceChildren(...data.retrieved.map((row) => {
+        const li = document.createElement("li");
+        li.textContent = row.year ? `${row.title} (${row.year}) ` : `${row.title} `;
+        const score = document.createElement("span");
+        score.className = "score";
+        score.textContent = `score ${row.rerank_score.toFixed(2)}`;
+        li.append(score);
+        return li;
+      }));
+      const t = data.timings_ms;
+      timingsEl.textContent =
+        `retrieve ${t.retrieve ?? 0} ms · re-rank ${t.rerank ?? 0} ms · generate ${t.generate ?? 0} ms · total ${t.total ?? 0} ms`;
+      resultEl.hidden = false;
+      statusEl.textContent = "";
+    } catch (error) {
+      statusEl.className = "error";
+      statusEl.textContent = error.message;
+    } finally {
+      submit.disabled = false;
+    }
+  });
+</script>
+</body>
+</html>

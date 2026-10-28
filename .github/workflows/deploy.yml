@@ -1,0 +1,114 @@
+name: deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write # Workload Identity Federation
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+env:
+  PYTHON_VERSION: "3.11"
+  TORCH_VERSION: "2.14.1"
+  GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+  GCP_REGION: ${{ vars.GCP_REGION || 'europe-west1' }}
+  WIF_PROVIDER: ${{ vars.WIF_PROVIDER }}
+  DEPLOYER_SA: ${{ vars.DEPLOYER_SA }}
+  RUNTIME_SA: ${{ vars.RUNTIME_SA }}
+  AR_REPO: ${{ vars.AR_REPO }}
+  INDEX_BUCKET: ${{ vars.INDEX_BUCKET }}
+  SERVICE_NAME: ${{ vars.SERVICE_NAME }}
+  GROQ_SECRET: groq-api-key # Secret Manager secret name (docs/gcp-setup.md)
+
+jobs:
+  deploy:
+    name: Quality gate, build and deploy to Cloud Run
+    # Skipped (not failed) until the GCP repository variables exist; see docs/gcp-setup.md.
+    if: vars.GCP_PROJECT_ID != ''
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check repository variables
+        run: |
+          missing=""
+          for name in GCP_PROJECT_ID WIF_PROVIDER DEPLOYER_SA RUNTIME_SA AR_REPO INDEX_BUCKET SERVICE_NAME; do
+            [ -n "${!name}" ] || missing="$missing $name"
+          done
+          if [ -n "$missing" ]; then echo "::error::Missing repository variables:$missing"; exit 1; fi
+          echo "IMAGE=${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${AR_REPO}/${SERVICE_NAME}:${GITHUB_SHA}" >> "$GITHUB_ENV"
+
+      - uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud (Workload Identity Federation)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.DEPLOYER_SA }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Download index artifacts
+        run: |
+          mkdir -p artifacts/index
+          gcloud storage cp "gs://${INDEX_BUCKET}/index/*" artifacts/index/
+          cat artifacts/index/manifest.json
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        run: |
+          pip install "torch==${TORCH_VERSION}" --index-url https://download.pytorch.org/whl/cpu
+          pip install .
+
+      - name: Quality gate (Recall@5 >= 0.90 on the 16 answerable test queries)
+        run: python scripts/eval_retrieval.py --index-dir artifacts/index --min-recall 0.90 --json-out results/eval_retrieval.json
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: eval-retrieval
+          path: results/eval_retrieval.json
+          if-no-files-found: ignore
+
+      - name: Build and push image
+        run: |
+          gcloud auth configure-docker "${GCP_REGION}-docker.pkg.dev" --quiet
+          docker build --build-arg TORCH_VERSION="${TORCH_VERSION}" -t "$IMAGE" .
+          docker push "$IMAGE"
+
+      - name: Deploy to Cloud Run
+        id: deploy
+        uses: google-github-actions/deploy-cloudrun@v2
+        with:
+          service: ${{ env.SERVICE_NAME }}
+          region: ${{ env.GCP_REGION }}
+          image: ${{ env.IMAGE }}
+          env_vars: |
+            LLM_PROVIDER=groq
+            GROQ_MODEL=llama-3.3-70b-versatile
+            TRUST_X_FORWARDED_FOR=true
+            METRICS_PUBLIC=false
+          secrets: |
+            GROQ_API_KEY=${{ env.GROQ_SECRET }}:latest
+          flags: >-
+            --memory=2Gi
+            --cpu=1
+            --concurrency=4
+            --min-instances=0
+            --max-instances=3
+            --timeout=60
+            --cpu-boost
+            --allow-unauthenticated
+            --service-account=${{ env.RUNTIME_SA }}
+
+      - name: Post-deploy smoke test
+        run: python scripts/smoke_test.py "${{ steps.deploy.outputs.url }}" --wait 300

@@ -1,0 +1,133 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.11"
+  TORCH_VERSION: "2.14.1"
+  TORCH_INDEX: https://download.pytorch.org/whl/cpu
+
+jobs:
+  lint-test:
+    name: Lint and unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install
+        run: |
+          pip install "torch==${TORCH_VERSION}" --index-url "$TORCH_INDEX"
+          pip install -e ".[dev]"
+      - name: Ruff lint
+        run: ruff check .
+      - name: Ruff format
+        run: ruff format --check .
+      - name: Unit tests
+        run: pytest
+
+  docker-smoke:
+    name: Docker image smoke test
+    needs: lint-test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install
+        run: |
+          pip install "torch==${TORCH_VERSION}" --index-url "$TORCH_INDEX"
+          pip install -e .
+      - name: Build the fixture index (12 movies)
+        run: python scripts/build_index.py tests/fixtures/movies --out-dir artifacts/index --expected-count 12 --device cpu
+      - uses: docker/setup-buildx-action@v3
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: movie-rag:ci
+          build-args: TORCH_VERSION=${{ env.TORCH_VERSION }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Run container (fake LLM provider)
+        run: docker run -d --name movie-rag -p 8080:8080 -e LLM_PROVIDER=fake movie-rag:ci
+      - name: Smoke test
+        run: python scripts/smoke_test.py http://localhost:8080 --wait 180
+      - name: Image checks
+        run: |
+          docker image ls movie-rag:ci
+          test "$(docker inspect --format '{{.Config.User}}' movie-rag:ci)" = "app"
+      - name: Container logs
+        if: always()
+        run: docker logs movie-rag || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fixture-index
+          path: artifacts/index/
+          retention-days: 1
+
+  kind-smoke:
+    name: Kubernetes (kind) smoke test
+    needs: docker-smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: fixture-index
+          path: artifacts/index
+      - uses: docker/setup-buildx-action@v3
+      - name: Build image (from the docker-smoke cache)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: movie-rag:ci
+          build-args: TORCH_VERSION=${{ env.TORCH_VERSION }}
+          cache-from: type=gha
+      - name: Create kind cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: movie-rag
+      - name: Install metrics-server
+        run: |
+          kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/download/v0.7.2/components.yaml
+          kubectl -n kube-system patch deployment metrics-server --type=json \
+            -p '[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"}]'
+          kubectl -n kube-system rollout status deployment/metrics-server --timeout=180s
+      - name: Load image into kind
+        run: kind load docker-image movie-rag:ci --name movie-rag
+      - name: Apply manifests
+        run: kubectl apply -f k8s/configmap.yaml -f k8s/deployment.yaml -f k8s/service.yaml -f k8s/hpa.yaml
+      - name: Wait for rollout
+        run: kubectl rollout status deployment/movie-rag --timeout=300s
+      - name: Smoke test through a port-forward
+        run: |
+          kubectl port-forward service/movie-rag 8080:80 > /tmp/port-forward.log 2>&1 &
+          sleep 5
+          python3 scripts/smoke_test.py http://localhost:8080 --wait 60
+      - name: HPA status
+        run: kubectl get hpa movie-rag
+      - name: Diagnostics
+        if: failure()
+        run: |
+          kubectl get pods -o wide
+          kubectl describe deployment movie-rag
+          kubectl logs deployment/movie-rag --tail=200 || true
+          cat /tmp/port-forward.log || true
