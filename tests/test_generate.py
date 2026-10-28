@@ -8,6 +8,7 @@ from movie_rag.generate import (
     GroqGenerator,
     build_messages,
     is_refusal,
+    make_generator,
     mentions_post_cutoff_year,
     parse_citations,
     postprocess_answer,
@@ -93,8 +94,9 @@ def groq_with(responses, sleeps=None):
     return generator, calls
 
 
-def ok(content="John Lasseter [Toy Story]"):
-    return httpx.Response(200, json={"choices": [{"message": {"content": content}}]})
+def ok(content="John Lasseter [Toy Story]", finish_reason="stop", **message):
+    choice = {"message": {"content": content, **message}, "finish_reason": finish_reason}
+    return httpx.Response(200, json={"choices": [choice]})
 
 
 def test_groq_success_sends_temperature_zero_and_bearer_key():
@@ -141,3 +143,39 @@ def test_groq_without_key_fails_without_calling_the_api():
     generator = GroqGenerator(api_key=None, model="m", client=httpx.Client(transport=httpx.MockTransport(None)))
     with pytest.raises(GenerationUnavailable, match="GROQ_API_KEY"):
         generator.complete([{"role": "user", "content": "hi"}])
+
+
+def test_groq_uses_only_the_message_content_not_the_reasoning():
+    reasoning = "Document 2 is the sequel [Toy Story 2]; the question asks about [Toy Story]."
+    generator, _ = groq_with([ok("John Lasseter directed it. [Toy Story]", reasoning=reasoning)])
+    assert generator.complete([{"role": "user", "content": "hi"}]) == "John Lasseter directed it. [Toy Story]"
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "<think>Document 2 is the sequel [Toy Story 2].</think>\nJohn Lasseter directed it. [Toy Story]",
+        "<THINK>\nmaybe [Toy Story 2]?\n</THINK>John Lasseter directed it. [Toy Story]",
+        "Document 2 is the sequel [Toy Story 2].</think>\n\nJohn Lasseter directed it. [Toy Story]",
+    ],
+)
+def test_think_blocks_are_stripped_before_citations_are_parsed(content):
+    generator, _ = groq_with([ok(content)])
+    answer = generator.complete([{"role": "user", "content": "hi"}])
+    assert answer == "John Lasseter directed it. [Toy Story]"
+    assert parse_citations(answer, allowed_titles=["Toy Story", "Toy Story 2"]) == ["Toy Story"]
+
+
+@pytest.mark.parametrize("content", ["", None, "<think>The answer is in Document 1 [Toy Story], so"])
+def test_groq_without_answer_text_is_unavailable_not_a_silent_refusal(content):
+    generator, _ = groq_with([ok(content, finish_reason="length")])
+    with pytest.raises(GenerationUnavailable, match="finish_reason=length"):
+        generator.complete([{"role": "user", "content": "hi"}])
+
+
+def test_groq_defaults_leave_room_for_reasoning():
+    from movie_rag.config import Settings
+
+    generator = make_generator(Settings(llm_provider="groq", groq_api_key="gsk_test_secret"))
+    assert generator.model == "openai/gpt-oss-120b"
+    assert generator.max_tokens == 1024
