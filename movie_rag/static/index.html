@@ -44,7 +44,8 @@
       padding: 16px 20px; margin-bottom: 16px;
     }
     .card h2 { font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); margin: 0 0 8px; }
-    #answer { font-size: 1.1rem; margin: 0; white-space: pre-wrap; }
+    /* Answers are plain text set via textContent; pre-line keeps "- " list items on separate lines. */
+    #answer { font-size: 1.1rem; margin: 0; white-space: pre-line; }
     #answer.refused, #status.error { color: var(--warn); }
     ol { margin: 0; padding-left: 1.4rem; }
     li { margin: 2px 0; }
