@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: movie-rag-config
+  labels:
+    app: movie-rag
+data:
+  # "fake" for the kind smoke test; use "groq" together with the movie-rag-secrets Secret.
+  LLM_PROVIDER: "fake"
+  GROQ_MODEL: "llama-3.3-70b-versatile"
+  RATE_LIMIT_PER_MINUTE: "20"
+  WEB_CONCURRENCY: "1"
+  LOG_LEVEL: "INFO"
